@@ -1,0 +1,7 @@
+# OS and editor files
+Thumbs.db
+.DS_Store
+.vscode/
+
+# Fab zips and exports
+*.zip

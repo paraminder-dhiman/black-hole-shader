@@ -1,0 +1,7 @@
+# Unreal assets are binary · never try to merge or change line endings
+*.uasset binary
+*.umap binary
+
+# Shader code and copied graph text stay as normal text
+*.hlsl text
+*.txt text
