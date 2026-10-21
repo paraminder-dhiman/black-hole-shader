@@ -338,7 +338,7 @@ struct Functions
         
         }
 
-        Mask = Captured ? 1.0 :0.0;
+        Mask = Captured ? 0.0 :1.0;
 
         Color = float4(RayColor, 1.0 - Transmittance);
         Dir = RayDir;
