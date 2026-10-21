@@ -1,4 +1,3 @@
-#define STEPS 5000
 #define SHADOWSTEPS 8
 #define PI2 6.28318
 #define SPEED_OF_LIGHT 299792458.0
@@ -39,6 +38,11 @@ struct BlackHoleProperties
     float3 BlackHolePos;
     float3 CameraPos;
     float3 CameraVector;
+
+    float StepScale;
+    float VolumeStep;
+    float MaxSteps;
+    float Jitter;
     
 
     Texture2D AtlasTexture;
@@ -61,19 +65,11 @@ struct Functions
         return false;
     }
         
-    float Cross2(float3 A, float3 B)
+    float3 Acceleration(float3 P, float3 V, BlackHoleProperties BHP)
     {
-        return pow((A.y*B.z) - (B.y*A.z), 2.0) + pow((A.z*B.x) - (A.x*B.z), 2.0) + pow((A.x*B.y) - (A.y*B.x), 2.0);
-    }
-
-    float3 GravityForce(float3 RayPos, float3 RayDir, BlackHoleProperties BHP)
-    {
-        RayDir = normalize(RayDir);
-        float DistToSingularity = length(RayPos);
-        float SquaredDistance = DistToSingularity * DistToSingularity;
-        float3 SingularityToPos = normalize(RayPos);
-
-        return (-3.0 * BHP.Mass) / SquaredDistance * Cross2(SingularityToPos, RayDir) * SingularityToPos;
+        float3 C = cross(P, V);
+        float R2 = dot(P, P);
+        return (-3.0 * BHP.Mass * dot(C, C) / (R2 * R2 * sqrt(R2))) * P;
     }
 
     bool CrossedAccretionDisk(float3 RayStart, float3 RayEnd)
@@ -94,14 +90,35 @@ struct Functions
         return DopplerFactor;
     }
 
-    void StepRay(inout float3 RayPos, inout float3 RayDir, out float3 PrevPos, BlackHoleProperties BHP)
+    void StepRay(inout float3 RayPos, inout float3 RayDir, float StepSize, BlackHoleProperties BHP)
     {
-        //Store Previous Position
-        PrevPos = RayPos;
+        RayDir += Acceleration(RayPos, RayDir, BHP) * (StepSize * 0.5);
+        RayPos += RayDir * StepSize;
+        RayDir += Acceleration(RayPos, RayDir, BHP) * (StepSize * 0.5);
+        RayDir = normalize(RayDir);
+    }
 
-        //Calculates new Position and Direction of the Ray
-        RayPos += RayDir + GravityForce(RayPos, RayDir, BHP);
-        RayDir = normalize(RayPos - PrevPos);
+    float GetStepSize(float3 RayPos, float Random, inout bool FirstVolumeStep, BlackHoleProperties BHP)
+    {
+        float R = length(RayPos);
+        float Rho = length(RayPos.xy);
+        float DZ = abs(RayPos.z) - BHP.FogHeight;
+        float DR = max(BHP.DiskInnerRadius - Rho, Rho - BHP.DiskOuterRadius);
+
+        if (DZ < 0.0 && DR < 0.0)
+        {
+            float Step = BHP.VolumeStep;
+            if (FirstVolumeStep)
+            {
+                Step *= 1.0 - BHP.Jitter + BHP.Jitter * Random;
+                FirstVolumeStep = false;
+            }
+            return Step;
+        }
+
+        float DistToVolume = (DZ > 0.0 && DR > 0.0) ? length(float2(DZ, DR)) : max(DZ, DR);
+        float Scale = (R < 2.0 * BHP.DiskOuterRadius) ? BHP.StepScale : 0.5;
+        return min(Scale * R, max(DistToVolume, 0.25 * BHP.VolumeStep));
     }
 
     float DiskMask(float3 RayPos, BlackHoleProperties BHP)
@@ -227,11 +244,10 @@ struct Functions
         return float4(DiskColor.xyz, Density);
     }
 
-    void BlackHole(inout float4 Color, inout float Mask, inout float3 Dir, float3 CameraPosition, BlackHoleProperties BHP)
+     void BlackHole(inout float4 Color, inout float Mask, inout float3 Dir, float3 CameraPosition, float Random, BlackHoleProperties BHP)
     {
         float3 RayPos = CameraPosition;
         float3 RayDir = Dir;
-        float3 PrevPos;
 
         float Transmittance = 1.0;
 
@@ -242,15 +258,26 @@ struct Functions
 
         //Begin Raymarch
         
-        for(int i = 0; i < STEPS; i++)
+        float EscapeRadius = 20.0 * BHP.DiskOuterRadius;
+        bool Captured = true;
+        bool FirstVolumeStep = true;
+
+        [loop]
+        for (int i = 0; i < (int)BHP.MaxSteps; i++)
         {
-            if(CrossedEventHorizon(RayPos, BHP))
+            float R = length(RayPos);
+            if (R <= BHP.EventHorizon)
             {
-                Mask = 0;
                 break;
             }
-            
-            StepRay(RayPos, RayDir, PrevPos, BHP);
+            if (R > EscapeRadius && dot(RayPos, RayDir) > 0.0)
+            {
+                Captured = false;
+                break;
+            }
+
+            float StepSize = GetStepSize(RayPos, Random, FirstVolumeStep, BHP);
+            StepRay(RayPos, RayDir, StepSize, BHP);
             //float DopplerColor = mainDoppler(RayPos, BHP);
 
             float DensitySample = 0;
@@ -306,6 +333,8 @@ struct Functions
         
         }
 
+        Mask = Captured ? 1.0 :0.0;
+
         Color = float4(RayColor, 1.0 - Transmittance);
         Dir = RayDir;
     }
@@ -317,7 +346,6 @@ float3 CameraVectorWS = -Parameters.CameraVector;
 
 //World to Local Transform
 FDFInverseMatrix WorldToLocal = DFFromTileOffset(GetWorldToInstance(Parameters));
-float3 Scale = DFMultiplyVector(float3(1.0, 0, 0), DFFromTileOffset(GetInstanceToWorld(Parameters)));
 float3 CameraPositionLS = DFMultiplyVector(LWCHackToFloat(ResolvedView.WorldCameraOrigin), WorldToLocal);
 float3 CameraVectorLS = DFMultiplyVector(CameraVectorWS, GetPrimitiveData(Parameters).WorldToLocal);
 
@@ -358,18 +386,20 @@ BHP.CameraPos = CameraPos;
 BHP.DopplerExponent = DopplerExponent;
 BHP.DopplerBias = DopplerBias;
 BHP.CameraVector = CameraVector;
+BHP.StepScale = StepScale;
+BHP.VolumeStep = VolumeStep;
+BHP.MaxSteps = MaxSteps;
+BHP.Jitter = JitterAmount;
 
 int3 RandPos = int3(Parameters.SvPosition.xy, View.StateFrameIndexMod8);
 float Random = float(Rand3DPCG16(RandPos).x) / 0xffff;
 
 float3 InitPos = CameraPositionLS;
-float3 InitDir = CameraVectorLS;
+float3 InitDir = normalize(CameraVectorLS);
 
 Dir = InitDir;
-InitPos += InitDir * Random * JitterAmount * Scale.x;
-
 
 Functions finalRender;
-finalRender.BlackHole(Color, Mask, Dir, InitPos, BHP);
+finalRender.BlackHole(Color, Mask, Dir, InitPos, Random, BHP);
 
 return 1.0;
